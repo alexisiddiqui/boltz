@@ -23,9 +23,7 @@ from boltz.data.write.writer import BoltzWriter
 from boltz.model.model import Boltz1
 
 CCD_URL = "https://huggingface.co/boltz-community/boltz-1/resolve/main/ccd.pkl"
-MODEL_URL = (
-    "https://huggingface.co/boltz-community/boltz-1/resolve/main/boltz1_conf.ckpt"
-)
+MODEL_URL = "https://huggingface.co/boltz-community/boltz-1/resolve/main/boltz1_conf.ckpt"
 
 
 @dataclass
@@ -129,10 +127,7 @@ def check_inputs(
                 msg = f"Found directory {d} instead of .fasta or .yaml."
                 raise RuntimeError(msg)
             else:
-                msg = (
-                    f"Unable to parse filetype {d.suffix}, "
-                    "please provide a .fasta or .yaml file."
-                )
+                msg = f"Unable to parse filetype {d.suffix}, please provide a .fasta or .yaml file."
                 raise RuntimeError(msg)
 
         data = filtered_data
@@ -261,7 +256,7 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
 
     Returns
     -------
-    BoltzProcessedInput
+    x
         The processed input data.
 
     """
@@ -276,11 +271,7 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
         manifest: Manifest = Manifest.load(manifest_path)
         input_ids = [d.stem for d in data]
         existing_records, processed_ids = zip(
-            *[
-                (record, record.id)
-                for record in manifest.records
-                if record.id in input_ids
-            ]
+            *[(record, record.id) for record in manifest.records if record.id in input_ids]
         )
 
         if isinstance(existing_records, tuple):
@@ -539,6 +530,12 @@ def cli() -> None:
     help="Pairing strategy to use. Used only if --use_msa_server is set. Options are 'greedy' and 'complete'",
     default="greedy",
 )
+@click.option(
+    "--max_msa_seqs",
+    type=int,
+    help="Maximum number of MSA sequences to use. Default is 4096.",
+    default=4096,
+)
 def predict(
     data: str,
     out_dir: str,
@@ -559,6 +556,7 @@ def predict(
     use_msa_server: bool = False,
     msa_server_url: str = "https://api.colabfold.com",
     msa_pairing_strategy: str = "greedy",
+    max_msa_seqs: int = 4096,
 ) -> None:
     """Run predictions with Boltz-1."""
     # If cpu, write a friendly warning
@@ -602,10 +600,7 @@ def predict(
     ):
         strategy = DDPStrategy()
         if len(data) < devices:
-            msg = (
-                "Number of requested devices is greater "
-                "than the number of predictions."
-            )
+            msg = "Number of requested devices is greater than the number of predictions."
             raise ValueError(msg)
 
     msg = f"Running predictions for {len(data)} structure"
@@ -620,6 +615,7 @@ def predict(
         ccd_path=ccd_path,
         use_msa_server=use_msa_server,
         msa_server_url=msa_server_url,
+        max_msa_seqs=max_msa_seqs,
         msa_pairing_strategy=msa_pairing_strategy,
     )
 
