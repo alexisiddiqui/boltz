@@ -36,13 +36,14 @@ def process_msa(
     path: Path,
     outdir: str,
     max_seqs: int,
+    max_unpaired_seqs: int,
     resource: Resource,
 ) -> None:
     """Run processing in a worker thread."""
     outdir = Path(outdir)
     out_path = outdir / f"{path.stem}.npz"
     if not out_path.exists():
-        msa = parse_a3m(path, resource, max_seqs)
+        msa = parse_a3m(path, resource, max_seqs, max_unpaired_seqs)
         np.savez_compressed(out_path, **asdict(msa))
 
 
@@ -72,6 +73,7 @@ def process(args) -> None:
             outdir=args.outdir,
             max_seqs=args.max_seqs,
             resource=resource,
+            max_unpaired_seqs=args.max_unpaired_seqs,
         )
 
         # Run in parallel
@@ -85,6 +87,7 @@ def process(args) -> None:
                 outdir=args.outdir,
                 max_seqs=args.max_seqs,
                 resource=resource,
+                max_unpaired_seqs=args.max_unpaired_seqs,
             )
 
 
@@ -123,8 +126,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max-seqs",
         type=int,
-        default=16384,
-        help="The maximum number of sequences.",
+        default=4192,
+        help="The maximum number of paired sequences.",
+    )
+    parser.add_argument(
+        "--max-unpaired-seqs",
+        type=int,
+        default=8192,
+        help="The maximum number of paired sequences.",
     )
     args = parser.parse_args()
     process(args)

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pickle
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -204,7 +206,7 @@ def compute_msa(
         # Get paired sequences
         paired = paired_msas[idx].strip().splitlines()
         paired = paired[1::2]  # ignore headers
-        paired = paired[: const.max_paired_seqs]
+        paired = paired[: const.max_msa_seqs]
 
         # Set key per row and remove empty sequences
         keys = [idx for idx, s in enumerate(paired) if s != "-" * len(s)]
@@ -237,6 +239,7 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
     msa_server_url: str,
     msa_pairing_strategy: str,
     max_msa_seqs: int = 4096,
+    max_unpaired_msa_seqs: int | None = None,
     use_msa_server: bool = False,
 ) -> None:
     """Process the input data and output directory.
@@ -256,7 +259,7 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
 
     Returns
     -------
-    x
+    BoltzProcessedInput
         The processed input data.
 
     """
@@ -362,6 +365,8 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
                     msa_server_url=msa_server_url,
                     msa_pairing_strategy=msa_pairing_strategy,
                 )
+            if max_unpaired_msa_seqs is None:
+                max_unpaired_msa_seqs = max_msa_seqs * 2
 
             # Parse MSA data
             msas = sorted({c.msa_id for c in target.record.chains if c.msa_id != -1})
@@ -382,14 +387,19 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
                         msa: MSA = parse_a3m(
                             msa_path,
                             taxonomy=None,
-                            max_seqs=max_msa_seqs,
+                            max_paired_seqs=max_msa_seqs,
+                            max_unpaired_seqs=max_unpaired_msa_seqs,
                         )
                     elif msa_path.suffix == ".csv":
-                        msa: MSA = parse_csv(msa_path, max_seqs=max_msa_seqs)
+                        msa: MSA = parse_csv(
+                            msa_path,
+                            max_paired_seqs=max_msa_seqs,
+                            max_unpaired_seqs=max_unpaired_msa_seqs,
+                        )
                     else:
                         msg = f"MSA file {msa_path} not supported, only a3m or csv."
                         raise RuntimeError(msg)
-
+                    msa.debug_save(processed_msa_dir / f"{target_id}_{msa_idx}.csv")
                     msa.dump(processed)
 
             # Modify records to point to processed MSA
@@ -533,8 +543,14 @@ def cli() -> None:
 @click.option(
     "--max_msa_seqs",
     type=int,
-    help="Maximum number of MSA sequences to use. Default is 4096.",
+    help="Maximum number of paired MSA sequences. Default is 4096.",
     default=4096,
+)
+@click.option(
+    "--max_unpaired_msa_seqs",
+    type=int,
+    help="Maximum number of unpaired MSA sequences. If set to none, then will use --max_msa_seqs **2. Default is 8192.",
+    default=None,
 )
 def predict(
     data: str,
@@ -557,6 +573,7 @@ def predict(
     msa_server_url: str = "https://api.colabfold.com",
     msa_pairing_strategy: str = "greedy",
     max_msa_seqs: int = 4096,
+    max_unpaired_msa_seqs: int | None = None,
 ) -> None:
     """Run predictions with Boltz-1."""
     # If cpu, write a friendly warning
@@ -607,6 +624,9 @@ def predict(
     msg += "s" if len(data) > 1 else ""
     click.echo(msg)
 
+    if max_unpaired_msa_seqs is None:
+        max_unpaired_msa_seqs = max_msa_seqs * 2
+
     # Process inputs
     ccd_path = cache / "ccd.pkl"
     process_inputs(
@@ -615,8 +635,9 @@ def predict(
         ccd_path=ccd_path,
         use_msa_server=use_msa_server,
         msa_server_url=msa_server_url,
-        max_msa_seqs=max_msa_seqs,
         msa_pairing_strategy=msa_pairing_strategy,
+        max_msa_seqs=max_msa_seqs,
+        max_unpaired_msa_seqs=max_unpaired_msa_seqs,
     )
 
     # Load processed data

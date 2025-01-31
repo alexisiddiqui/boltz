@@ -221,12 +221,8 @@ class Structure(NumpySerializable):
                 # Update the residue
                 new_res = res.copy()
                 new_res["atom_idx"] = atom_idx
-                new_res["atom_center"] = (
-                    atom_idx + new_res["atom_center"] - res["atom_idx"]
-                )
-                new_res["atom_disto"] = (
-                    atom_idx + new_res["atom_disto"] - res["atom_idx"]
-                )
+                new_res["atom_center"] = atom_idx + new_res["atom_center"] - res["atom_idx"]
+                new_res["atom_disto"] = atom_idx + new_res["atom_disto"] - res["atom_idx"]
                 residues.append(new_res)
                 res_map[res_start + j] = res_idx
                 res_idx += 1
@@ -321,6 +317,18 @@ class MSA(NumpySerializable):
     sequences: np.ndarray
     deletions: np.ndarray
     residues: np.ndarray
+
+    def debug_save(self, path: Path) -> None:
+        """Save sequences array to text file in a readable format."""
+        with open(path, "w") as f:
+            # Write header
+            header = "seq_idx\ttaxonomy\tres_start\tres_end\tdel_start\tdel_end\n"
+            f.write(header)
+
+            # Write each sequence row
+            for seq in self.sequences:
+                row = f"{seq['seq_idx']}\t{seq['taxonomy']}\t{seq['res_start']}\t{seq['res_end']}\t{seq['del_start']}\t{seq['del_end']}\n"
+                f.write(row)
 
 
 ####################################################################################################
