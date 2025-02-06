@@ -241,6 +241,7 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
     max_msa_seqs: int = 4096,
     max_unpaired_msa_seqs: int | None = None,
     use_msa_server: bool = False,
+    previous_msa_dir: str | None = None,
 ) -> None:
     """Process the input data and output directory.
 
@@ -344,18 +345,23 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
                     entity_id = chain.entity_id
                     msa_id = f"{target_id}_{entity_id}"
                     to_generate[msa_id] = target.sequences[entity_id]
-                    chain.msa_id = msa_dir / f"{msa_id}.csv"
+                    # chain.msa_id = msa_dir / f"{msa_id}.csv"
+                    if previous_msa_dir:
+                        chain.msa_id = previous_msa_dir / f"{msa_id}.csv"
+                    else:
+                        to_generate[msa_id] = target.sequences[entity_id]
+                        chain.msa_id = msa_dir / f"{msa_id}.csv"
 
                 # We do not support msa generation for non-protein chains
                 elif chain.msa_id == 0:
                     chain.msa_id = -1
 
             # Generate MSA
-            if to_generate and not use_msa_server:
-                msg = "Missing MSA's in input and --use_msa_server flag not set."
-                raise RuntimeError(msg)
+            if to_generate and not previous_msa_dir:
+                if not use_msa_server:
+                    msg = "Missing MSA's in input and --use_msa_server flag not set."
+                    raise RuntimeError(msg)
 
-            if to_generate:
                 msg = f"Generating MSA for {path} with {len(to_generate)} protein entities."
                 click.echo(msg)
                 compute_msa(
@@ -365,6 +371,10 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
                     msa_server_url=msa_server_url,
                     msa_pairing_strategy=msa_pairing_strategy,
                 )
+            else:
+                msg = f"Skipping MSA generation for {path}. Use --use_msa_server to generate MSA or add --previous_msa_dir to use existing MSA data."
+                click.echo(msg)
+
             if max_unpaired_msa_seqs is None:
                 max_unpaired_msa_seqs = max_msa_seqs * 2
 
@@ -552,6 +562,12 @@ def cli() -> None:
     help="Maximum number of unpaired MSA sequences. If set to none, then will use --max_msa_seqs **2. Default is 8192.",
     default=None,
 )
+@click.option(
+    "--previous_msa_dir",
+    type=str,
+    help="Path to the processed MSA data from a previous run. Useful when running multiple seeds. This will override 'use_msa_server' and (sub)sample the MSAs (a3m and csvs). Essentially this skips MSA generation and passes the 'path + msa_id .csv' straight to parse_a3m/csv.",a
+    default=None,
+)
 def predict(
     data: str,
     out_dir: str,
@@ -574,6 +590,7 @@ def predict(
     msa_pairing_strategy: str = "greedy",
     max_msa_seqs: int = 4096,
     max_unpaired_msa_seqs: int | None = None,
+    previous_msa_dir: str | None = None,
 ) -> None:
     """Run predictions with Boltz-1."""
     # If cpu, write a friendly warning
@@ -590,6 +607,9 @@ def predict(
     # Set seed if desired
     if seed is not None:
         seed_everything(seed)
+
+    if previous_msa_dir is not None:
+        use_msa_server = False
 
     # Set cache path
     cache = Path(cache).expanduser()
@@ -638,6 +658,7 @@ def predict(
         msa_pairing_strategy=msa_pairing_strategy,
         max_msa_seqs=max_msa_seqs,
         max_unpaired_msa_seqs=max_unpaired_msa_seqs,
+        previous_msa_dir=previous_msa_dir,
     )
 
     # Load processed data
