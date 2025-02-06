@@ -344,13 +344,12 @@ def process_inputs(  # noqa: C901, PLR0912, PLR0915
                 if (chain.mol_type == prot_id) and (chain.msa_id == 0):
                     entity_id = chain.entity_id
                     msa_id = f"{target_id}_{entity_id}"
-                    to_generate[msa_id] = target.sequences[entity_id]
-                    # chain.msa_id = msa_dir / f"{msa_id}.csv"
                     if previous_msa_dir:
-                        chain.msa_id = previous_msa_dir / f"{msa_id}.csv"
-                    else:
-                        to_generate[msa_id] = target.sequences[entity_id]
-                        chain.msa_id = msa_dir / f"{msa_id}.csv"
+                        # When using previous MSAs, set all chain MSA IDs to Previous/None
+                        chain.msa_id = Path(previous_msa_dir) / f"{msa_id}.csv"
+                        continue
+                    to_generate[msa_id] = target.sequences[entity_id]
+                    chain.msa_id = msa_dir / f"{msa_id}.csv"
 
                 # We do not support msa generation for non-protein chains
                 elif chain.msa_id == 0:
@@ -565,7 +564,7 @@ def cli() -> None:
 @click.option(
     "--previous_msa_dir",
     type=str,
-    help="Path to the processed MSA data from a previous run. Useful when running multiple seeds. This will override 'use_msa_server' and (sub)sample the MSAs (a3m and csvs). Essentially this skips MSA generation and passes the 'path + msa_id .csv' straight to parse_a3m/csv.",a
+    help="Path to the processed MSA data from a previous run. Useful when running multiple seeds. This will override 'use_msa_server' and (sub)sample the MSAs (a3m and csvs). Essentially this skips MSA generation and passes the 'path + msa_id .csv' straight to parse_a3m/csv.",
     default=None,
 )
 def predict(
