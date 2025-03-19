@@ -198,6 +198,8 @@ class MSAModule(nn.Module):
                         pairwise_num_heads,
                     )
                 )
+        print("MSA dropout:", msa_dropout)
+        print("Z dropout:", z_dropout)
 
     def forward(
         self,
@@ -487,6 +489,8 @@ class PairformerModule(nn.Module):
                         False if i < num_blocks - 1 else no_update_z,
                     )
                 )
+        # print dropout
+        print("Pairformer dropout:", dropout)
 
     def forward(
         self,
