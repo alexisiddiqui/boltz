@@ -1,7 +1,7 @@
 from typing import Dict, Tuple
 
-from fairscale.nn.checkpoint.checkpoint_activations import checkpoint_wrapper
 import torch
+from fairscale.nn.checkpoint.checkpoint_activations import checkpoint_wrapper
 from torch import Tensor, nn
 
 from boltz.data import const
@@ -294,7 +294,6 @@ class MSALayer(nn.Module):
 
         Parameters
         ----------
-
         msa_s : int
             The MSA embedding size.
         token_z : int
@@ -372,30 +371,28 @@ class MSALayer(nn.Module):
 
         """
         # Communication to MSA stack
-        msa_dropout = get_dropout_mask(self.msa_dropout, m, self.training)
-        m = m + msa_dropout * self.pair_weighted_averaging(
-            m, z, token_mask, chunk_heads_pwa
-        )
+        msa_dropout = get_dropout_mask(self.msa_dropout, m, True)
+        m = m + msa_dropout * self.pair_weighted_averaging(m, z, token_mask, chunk_heads_pwa)
         m = m + self.msa_transition(m, chunk_size_transition_msa)
 
         # Communication to pairwise stack
         z = z + self.outer_product_mean(m, msa_mask, chunk_size_outer_product)
 
         # Compute pairwise stack
-        dropout = get_dropout_mask(self.z_dropout, z, self.training)
+        dropout = get_dropout_mask(self.z_dropout, z, True)
         z = z + dropout * self.tri_mul_out(z, mask=token_mask)
 
-        dropout = get_dropout_mask(self.z_dropout, z, self.training)
+        dropout = get_dropout_mask(self.z_dropout, z, True)
         z = z + dropout * self.tri_mul_in(z, mask=token_mask)
 
-        dropout = get_dropout_mask(self.z_dropout, z, self.training)
+        dropout = get_dropout_mask(self.z_dropout, z, True)
         z = z + dropout * self.tri_att_start(
             z,
             mask=token_mask,
             chunk_size=chunk_size_tri_attn,
         )
 
-        dropout = get_dropout_mask(self.z_dropout, z, self.training, columnwise=True)
+        dropout = get_dropout_mask(self.z_dropout, z, True, columnwise=True)
         z = z + dropout * self.tri_att_end(
             z,
             mask=token_mask,
@@ -416,7 +413,7 @@ class PairformerModule(nn.Module):
         token_z: int,
         num_blocks: int,
         num_heads: int = 16,
-        dropout: float = 0.25,
+        dropout: float = 0.5,
         pairwise_head_width: int = 32,
         pairwise_num_heads: int = 4,
         activation_checkpointing: bool = False,
@@ -511,6 +508,7 @@ class PairformerModule(nn.Module):
             The token mask
         pair_mask : Tensor
             The pairwise mask
+
         Returns
         -------
         Tensor
@@ -598,20 +596,20 @@ class PairformerLayer(nn.Module):
     ) -> Tuple[Tensor, Tensor]:
         """Perform the forward pass."""
         # Compute pairwise stack
-        dropout = get_dropout_mask(self.dropout, z, self.training)
+        dropout = get_dropout_mask(self.dropout, z, True)
         z = z + dropout * self.tri_mul_out(z, mask=pair_mask)
 
-        dropout = get_dropout_mask(self.dropout, z, self.training)
+        dropout = get_dropout_mask(self.dropout, z, True)
         z = z + dropout * self.tri_mul_in(z, mask=pair_mask)
 
-        dropout = get_dropout_mask(self.dropout, z, self.training)
+        dropout = get_dropout_mask(self.dropout, z, True)
         z = z + dropout * self.tri_att_start(
             z,
             mask=pair_mask,
             chunk_size=chunk_size_tri_attn,
         )
 
-        dropout = get_dropout_mask(self.dropout, z, self.training, columnwise=True)
+        dropout = get_dropout_mask(self.dropout, z, True, columnwise=True)
         z = z + dropout * self.tri_att_end(
             z,
             mask=pair_mask,

@@ -567,6 +567,24 @@ def cli() -> None:
     help="Path to the processed MSA data from a previous run. Useful when running multiple seeds. This will override 'use_msa_server' and (sub)sample the MSAs (a3m and csvs). Essentially this skips MSA generation and passes the 'path + msa_id .csv' straight to parse_a3m/csv.",
     default=None,
 )
+@click.option(
+    "--msa_dropout",
+    type=float,
+    help="Dropout rate for the MSA module. Default is 0.15.",
+    default=0.0,
+)
+@click.option(
+    "--msa_z_dropout",
+    type=float,
+    help="Dropout rate for the pairwise features in MSA module. Default is 0.25.",
+    default=0.0,
+)
+@click.option(
+    "--pairformer_dropout",
+    type=float,
+    help="Dropout rate for the Pairformer module. Default is 0.25.",
+    default=0.0,
+)
 def predict(
     data: str,
     out_dir: str,
@@ -590,6 +608,9 @@ def predict(
     max_msa_seqs: int = 4096,
     max_unpaired_msa_seqs: int | None = None,
     previous_msa_dir: str | None = None,
+    msa_dropout: float = 0.15,
+    msa_z_dropout: float = 0.25,
+    pairformer_dropout: float = 0.25,
 ) -> None:
     """Run predictions with Boltz-1."""
     # If cpu, write a friendly warning
@@ -601,7 +622,7 @@ def predict(
     torch.set_grad_enabled(False)
 
     # Ignore matmul precision warning
-    torch.set_float32_matmul_precision("highest")
+    torch.set_float32_matmul_precision("medium")
 
     # Set seed if desired
     if seed is not None:
@@ -696,6 +717,9 @@ def predict(
         predict_args=predict_args,
         map_location="cpu",
         diffusion_process_args=asdict(diffusion_params),
+        msa_dropout=msa_dropout,
+        msa_z_dropout=msa_z_dropout,
+        pairformer_dropout=pairformer_dropout,
         ema=False,
     )
     model_module.eval()
@@ -713,7 +737,7 @@ def predict(
         callbacks=[pred_writer],
         accelerator=accelerator,
         devices=devices,
-        precision=32,
+        # precision=32,
     )
 
     # Compute predictions
