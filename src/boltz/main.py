@@ -585,6 +585,12 @@ def cli() -> None:
     help="Dropout rate for the Pairformer module. Default is 0.25.",
     default=0.0,
 )
+@click.option(
+    "--mask_trunkz_confidence",
+    is_flag=True,
+    help="Whether to mask (zero out) the trunk Z values when fed into the confidence module. Default is False.",
+    default=False,
+)
 def predict(
     data: str,
     out_dir: str,
@@ -611,6 +617,7 @@ def predict(
     msa_dropout: float = 0.15,
     msa_z_dropout: float = 0.25,
     pairformer_dropout: float = 0.25,
+    mask_trunkz_confidence: bool = False,
 ) -> None:
     """Run predictions with Boltz-1."""
     # If cpu, write a friendly warning
@@ -708,6 +715,7 @@ def predict(
         "write_confidence_summary": True,
         "write_full_pae": write_full_pae,
         "write_full_pde": write_full_pde,
+        "mask_trunkZ_confidence": mask_trunkz_confidence,
     }
     diffusion_params = BoltzDiffusionParams()
     diffusion_params.step_scale = step_scale

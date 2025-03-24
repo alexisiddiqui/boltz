@@ -1,9 +1,8 @@
 import torch
 from torch import nn
-import torch.nn.functional as F
 
-from boltz.data import const
 import boltz.model.layers.initialize as init
+from boltz.data import const
 from boltz.model.modules.confidence_utils import (
     compute_aggregated_metric,
     compute_ptms,
@@ -81,9 +80,7 @@ class ConfidenceModule(nn.Module):
         self.register_buffer("boundaries", boundaries)
         self.dist_bin_pairwise_embed = nn.Embedding(num_dist_bins, token_z)
         init.gating_init_(self.dist_bin_pairwise_embed.weight)
-        s_input_dim = (
-            token_s + 2 * const.num_tokens + 1 + len(const.pocket_contact_info)
-        )
+        s_input_dim = token_s + 2 * const.num_tokens + 1 + len(const.pocket_contact_info)
 
         self.use_s_diffusion = use_s_diffusion
         if use_s_diffusion:
@@ -105,9 +102,7 @@ class ConfidenceModule(nn.Module):
 
         self.imitate_trunk = imitate_trunk
         if self.imitate_trunk:
-            s_input_dim = (
-                token_s + 2 * const.num_tokens + 1 + len(const.pocket_contact_info)
-            )
+            s_input_dim = token_s + 2 * const.num_tokens + 1 + len(const.pocket_contact_info)
             self.s_init = nn.Linear(s_input_dim, token_s, bias=False)
             self.z_init_1 = nn.Linear(s_input_dim, token_z, bias=False)
             self.z_init_2 = nn.Linear(s_input_dim, token_z, bias=False)
@@ -191,6 +186,7 @@ class ConfidenceModule(nn.Module):
         multiplicity=1,
         s_diffusion=None,
         run_sequentially=False,
+        mask_trunkZ=False,
     ):
         if run_sequentially and multiplicity > 1:
             assert z.shape[0] == 1, "Not supported with batch size > 1"
@@ -209,6 +205,7 @@ class ConfidenceModule(nn.Module):
                         if s_diffusion is not None
                         else None,
                         run_sequentially=False,
+                        mask_trunkZ=mask_trunkZ,
                     )
                 )
 
@@ -233,10 +230,7 @@ class ConfidenceModule(nn.Module):
 
             # Initialize the sequence and pairwise embeddings
             s_init = self.s_init(s_inputs)
-            z_init = (
-                self.z_init_1(s_inputs)[:, :, None]
-                + self.z_init_2(s_inputs)[:, None, :]
-            )
+            z_init = self.z_init_1(s_inputs)[:, :, None] + self.z_init_2(s_inputs)[:, None, :]
             relative_position_encoding = self.rel_pos(feats)
             z_init = z_init + relative_position_encoding
             z_init = z_init + self.token_bonds(feats["token_bonds"].float())
@@ -266,6 +260,10 @@ class ConfidenceModule(nn.Module):
             assert s_diffusion is not None
             s_diffusion = self.s_diffusion_norm(s_diffusion)
             s = s + self.s_diffusion_to_s(s_diffusion)
+
+        # If mask_trunkZ is True, set z to zero before adding projections
+        if mask_trunkZ:
+            z = torch.zeros_like(z)
 
         z = z.repeat_interleave(multiplicity, 0)
         z = (
@@ -357,7 +355,6 @@ class ConfidenceHeads(nn.Module):
         compute_pae : bool
             Whether to compute pae, by default False
         """
-
         super().__init__()
         self.max_num_atoms_per_token = 23
         self.to_pde_logits = LinearNoBias(token_z, num_pde_bins)
@@ -396,9 +393,7 @@ class ConfidenceHeads(nn.Module):
         # Compute the aggregated pLDDT and iPLDDT
         plddt = compute_aggregated_metric(plddt_logits)
         token_pad_mask = feats["token_pad_mask"].repeat_interleave(multiplicity, 0)
-        complex_plddt = (plddt * token_pad_mask).sum(dim=-1) / token_pad_mask.sum(
-            dim=-1
-        )
+        complex_plddt = (plddt * token_pad_mask).sum(dim=-1) / token_pad_mask.sum(dim=-1)
 
         is_contact = (d < 8).float()
         is_different_chain = (
@@ -409,9 +404,7 @@ class ConfidenceHeads(nn.Module):
             is_contact * is_different_chain * (1 - is_ligand_token).unsqueeze(-1),
             dim=-1,
         ).values
-        iplddt_weight = (
-            is_ligand_token * ligand_weight + token_interface_mask * interface_weight
-        )
+        iplddt_weight = is_ligand_token * ligand_weight + token_interface_mask * interface_weight
         complex_iplddt = (plddt * token_pad_mask * iplddt_weight).sum(dim=-1) / (
             torch.sum(token_pad_mask * iplddt_weight, dim=-1) + 1e-5
         )
@@ -430,17 +423,10 @@ class ConfidenceHeads(nn.Module):
         token_pad_pair_mask = (
             token_pad_mask.unsqueeze(-1)
             * token_pad_mask.unsqueeze(-2)
-            * (
-                1
-                - torch.eye(
-                    token_pad_mask.shape[1], device=token_pad_mask.device
-                ).unsqueeze(0)
-            )
+            * (1 - torch.eye(token_pad_mask.shape[1], device=token_pad_mask.device).unsqueeze(0))
         )
         token_pair_mask = token_pad_pair_mask * prob_contact
-        complex_pde = (pde * token_pair_mask).sum(dim=(1, 2)) / token_pair_mask.sum(
-            dim=(1, 2)
-        )
+        complex_pde = (pde * token_pair_mask).sum(dim=(1, 2)) / token_pair_mask.sum(dim=(1, 2))
         asym_id = feats["asym_id"].repeat_interleave(multiplicity, 0)
         token_interface_pair_mask = token_pair_mask * (
             asym_id.unsqueeze(-1) != asym_id.unsqueeze(-2)
