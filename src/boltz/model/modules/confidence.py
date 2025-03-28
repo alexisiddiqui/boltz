@@ -187,6 +187,9 @@ class ConfidenceModule(nn.Module):
         s_diffusion=None,
         run_sequentially=False,
         mask_trunkZ=False,
+        ablation_Z=False,
+        ablation_S=False,
+        ablation_X=False,
     ):
         if run_sequentially and multiplicity > 1:
             assert z.shape[0] == 1, "Not supported with batch size > 1"
@@ -206,6 +209,9 @@ class ConfidenceModule(nn.Module):
                         else None,
                         run_sequentially=False,
                         mask_trunkZ=mask_trunkZ,
+                        ablation_Z=ablation_Z,
+                        ablation_S=ablation_S,
+                        ablation_X=ablation_X,
                     )
                 )
 
@@ -309,6 +315,13 @@ class ConfidenceModule(nn.Module):
             z = z_t
 
         out_dict = {}
+
+        if ablation_Z:
+            z = torch.zeros_like(z)
+        if ablation_S:
+            s = torch.zeros_like(s)
+        if ablation_X:
+            x_pred = torch.zeros_like(x_pred)
 
         # confidence heads
         out_dict.update(

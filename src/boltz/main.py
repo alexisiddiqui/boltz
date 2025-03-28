@@ -591,6 +591,24 @@ def cli() -> None:
     help="Whether to mask (zero out) the trunk Z values when fed into the confidence module. Default is False.",
     default=False,
 )
+@click.option(
+    "--ablation_z",
+    type=bool,
+    help="Whether to ablate the Z module. Default is False.",
+    default=False,
+)
+@click.option(
+    "--ablation_s",
+    type=bool,
+    help="Whether to ablate the S module. Default is False.",
+    default=False,
+)
+@click.option(
+    "--ablation_x",
+    type=bool,
+    help="Whether to ablate the X module. Default is False.",
+    default=False,
+)
 def predict(
     data: str,
     out_dir: str,
@@ -618,6 +636,9 @@ def predict(
     msa_z_dropout: float = 0.25,
     pairformer_dropout: float = 0.25,
     mask_trunkz_confidence: bool = False,
+    ablation_z: bool = False,
+    ablation_s: bool = False,
+    ablation_x: bool = False,
 ) -> None:
     """Run predictions with Boltz-1."""
     # If cpu, write a friendly warning
@@ -716,6 +737,9 @@ def predict(
         "write_full_pae": write_full_pae,
         "write_full_pde": write_full_pde,
         "mask_trunkZ_confidence": mask_trunkz_confidence,
+        "ablation_Z": ablation_z,
+        "ablation_S": ablation_s,
+        "ablation_X": ablation_x,
     }
     diffusion_params = BoltzDiffusionParams()
     diffusion_params.step_scale = step_scale

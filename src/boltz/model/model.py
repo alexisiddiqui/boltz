@@ -270,6 +270,9 @@ class Boltz1(LightningModule):
         diffusion_samples: int = 1,
         run_confidence_sequentially: bool = False,
         mask_trunkZ_confidence: bool = False,
+        ablation_Z: bool = False,
+        ablation_S: bool = False,
+        ablation_X: bool = False,
     ) -> dict[str, Tensor]:
         dict_out = {}
 
@@ -362,6 +365,9 @@ class Boltz1(LightningModule):
                     multiplicity=diffusion_samples,
                     run_sequentially=run_confidence_sequentially,
                     mask_trunkZ=mask_trunkZ_confidence,
+                    ablation_Z=ablation_Z,
+                    ablation_S=ablation_S,
+                    ablation_X=ablation_X,
                 )
             )
         if self.confidence_prediction and self.confidence_module.use_s_diffusion:
@@ -1073,6 +1079,9 @@ class Boltz1(LightningModule):
                 diffusion_samples=self.predict_args["diffusion_samples"],
                 run_confidence_sequentially=True,
                 mask_trunkZ_confidence=self.predict_args.get("mask_trunkZ_confidence", False),
+                ablation_Z=self.predict_args.get("ablation_Z", False),
+                ablation_S=self.predict_args.get("ablation_S", False),
+                ablation_X=self.predict_args.get("ablation_X", False),
             )
             pred_dict = {"exception": False}
             pred_dict["masks"] = batch["atom_pad_mask"]
