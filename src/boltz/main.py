@@ -421,8 +421,95 @@ def cli() -> None:
     return
 
 
+def predict_single_path(
+    model_module: Boltz1,
+    data_path: Path,
+    out_dir: Path,
+    ccd_path: Path,
+    accelerator: str,
+    devices: int,
+    num_workers: int,
+    override: bool,
+    use_msa_server: bool,
+    msa_server_url: str,
+    max_msa_seqs: int,
+    msa_pairing_strategy: str,
+    output_format: Literal["pdb", "mmcif"],
+    # write_full_pae: bool,
+    # write_full_pde: bool,
+) -> None:
+    """Run prediction for a single input path."""
+    # Create output directory for this specific input
+    path_out_dir = out_dir / f"boltz_results_{data_path.stem}"
+    path_out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Validate inputs
+    validated_data = check_inputs(data_path, path_out_dir, override)
+    if not validated_data:
+        click.echo(f"No predictions to run for {data_path}, skipping.")
+        return
+
+    # Process inputs
+    process_inputs(
+        data=validated_data,
+        out_dir=path_out_dir,
+        ccd_path=ccd_path,
+        use_msa_server=use_msa_server,
+        msa_server_url=msa_server_url,
+        max_msa_seqs=max_msa_seqs,
+        msa_pairing_strategy=msa_pairing_strategy,
+    )
+
+    # Load processed data
+    processed_dir = path_out_dir / "processed"
+    processed = BoltzProcessedInput(
+        manifest=Manifest.load(processed_dir / "manifest.json"),
+        targets_dir=processed_dir / "structures",
+        msa_dir=processed_dir / "msa",
+    )
+
+    # Create data module
+    data_module = BoltzInferenceDataModule(
+        manifest=processed.manifest,
+        target_dir=processed.targets_dir,
+        msa_dir=processed.msa_dir,
+        num_workers=num_workers,
+    )
+
+    # Create prediction writer
+    pred_writer = BoltzWriter(
+        data_dir=processed.targets_dir,
+        output_dir=path_out_dir / "predictions",
+        output_format=output_format,
+    )
+
+    # Set up strategy for multi-device training
+    strategy = "auto"
+    if (isinstance(devices, int) and devices > 1) or (
+        isinstance(devices, list) and len(devices) > 1
+    ):
+        strategy = DDPStrategy()
+
+    # Create trainer
+    trainer = Trainer(
+        default_root_dir=path_out_dir,
+        strategy=strategy,
+        callbacks=[pred_writer],
+        accelerator=accelerator,
+        devices=devices,
+        precision=32,
+    )
+
+    # Compute predictions
+    trainer.predict(
+        model_module,
+        datamodule=data_module,
+        return_predictions=False,
+    )
+
+
 @cli.command()
-@click.argument("data", type=click.Path(exists=True))
+@click.argument("data", type=click.Path(exists=True), nargs=-1)  # Accept multiple paths
 @click.option(
     "--out_dir",
     type=click.Path(exists=False),
@@ -537,7 +624,7 @@ def cli() -> None:
     default=4096,
 )
 def predict(
-    data: str,
+    data: tuple[str],  # Changed to tuple to handle multiple paths
     out_dir: str,
     cache: str = "~/.boltz",
     checkpoint: Optional[str] = None,
@@ -579,63 +666,17 @@ def predict(
     cache.mkdir(parents=True, exist_ok=True)
 
     # Create output directories
-    data = Path(data).expanduser()
     out_dir = Path(out_dir).expanduser()
-    out_dir = out_dir / f"boltz_results_{data.stem}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Download necessary data and model
     download(cache)
 
-    # Validate inputs
-    data = check_inputs(data, out_dir, override)
     if not data:
-        click.echo("No predictions to run, exiting.")
+        click.echo("No input data provided, exiting.")
         return
 
-    # Set up trainer
-    strategy = "auto"
-    if (isinstance(devices, int) and devices > 1) or (
-        isinstance(devices, list) and len(devices) > 1
-    ):
-        strategy = DDPStrategy()
-        if len(data) < devices:
-            msg = "Number of requested devices is greater than the number of predictions."
-            raise ValueError(msg)
-
-    msg = f"Running predictions for {len(data)} structure"
-    msg += "s" if len(data) > 1 else ""
-    click.echo(msg)
-
-    # Process inputs
-    ccd_path = cache / "ccd.pkl"
-    process_inputs(
-        data=data,
-        out_dir=out_dir,
-        ccd_path=ccd_path,
-        use_msa_server=use_msa_server,
-        msa_server_url=msa_server_url,
-        max_msa_seqs=max_msa_seqs,
-        msa_pairing_strategy=msa_pairing_strategy,
-    )
-
-    # Load processed data
-    processed_dir = out_dir / "processed"
-    processed = BoltzProcessedInput(
-        manifest=Manifest.load(processed_dir / "manifest.json"),
-        targets_dir=processed_dir / "structures",
-        msa_dir=processed_dir / "msa",
-    )
-
-    # Create data module
-    data_module = BoltzInferenceDataModule(
-        manifest=processed.manifest,
-        target_dir=processed.targets_dir,
-        msa_dir=processed.msa_dir,
-        num_workers=num_workers,
-    )
-
-    # Load model
+    # Load model once for all predictions
     if checkpoint is None:
         checkpoint = cache / "boltz1_conf.ckpt"
 
@@ -659,28 +700,29 @@ def predict(
     )
     model_module.eval()
 
-    # Create prediction writer
-    pred_writer = BoltzWriter(
-        data_dir=processed.targets_dir,
-        output_dir=out_dir / "predictions",
-        output_format=output_format,
-    )
+    # Process each path individually
+    ccd_path = cache / "ccd.pkl"
+    for path_str in data:
+        click.echo(f"Processing {path_str}")
+        path = Path(path_str).expanduser()
 
-    trainer = Trainer(
-        default_root_dir=out_dir,
-        strategy=strategy,
-        callbacks=[pred_writer],
-        accelerator=accelerator,
-        devices=devices,
-        precision=32,
-    )
-
-    # Compute predictions
-    trainer.predict(
-        model_module,
-        datamodule=data_module,
-        return_predictions=False,
-    )
+        predict_single_path(
+            model_module=model_module,
+            data_path=path,
+            out_dir=out_dir,
+            ccd_path=ccd_path,
+            accelerator=accelerator,
+            devices=devices,
+            num_workers=num_workers,
+            override=override,
+            use_msa_server=use_msa_server,
+            msa_server_url=msa_server_url,
+            max_msa_seqs=max_msa_seqs,
+            msa_pairing_strategy=msa_pairing_strategy,
+            output_format=output_format,
+            # write_full_pae=write_full_pae,
+            # write_full_pde=write_full_pde,
+        )
 
 
 if __name__ == "__main__":
