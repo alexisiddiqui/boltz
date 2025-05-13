@@ -273,52 +273,75 @@ class Boltz1(LightningModule):
         ablation_Z: bool = False,
         ablation_S: bool = False,
         ablation_X: bool = False,
+        save_latents_for_output: bool = False,
     ) -> dict[str, Tensor]:
         dict_out = {}
 
-        # Compute input embeddings
-        with torch.set_grad_enabled(self.training and self.structure_prediction_training):
-            s_inputs = self.input_embedder(feats)
+        # Check if latents are pre-loaded
+        use_loaded_latents = "loaded_s_trunk" in feats
 
-            # Initialize the sequence and pairwise embeddings
-            s_init = self.s_init(s_inputs)
-            z_init = self.z_init_1(s_inputs)[:, :, None] + self.z_init_2(s_inputs)[:, None, :]
-            relative_position_encoding = self.rel_pos(feats)
-            z_init = z_init + relative_position_encoding
-            z_init = z_init + self.token_bonds(feats["token_bonds"].float())
+        if use_loaded_latents:
+            s = feats["loaded_s_trunk"]
+            z = feats["loaded_z_trunk"]
+            s_inputs = feats["loaded_s_inputs"]
+            relative_position_encoding = feats["loaded_rel_pos_encoding"]
+            # If latents are loaded, we assume they are post-trunk computation
+            # So, pdistogram is computed from the loaded z
+            with torch.set_grad_enabled(self.training and self.structure_prediction_training):
+                pdistogram = self.distogram_module(z)
+                dict_out["pdistogram"] = pdistogram
 
-            # Perform rounds of the pairwise stack
-            s = torch.zeros_like(s_init)
-            z = torch.zeros_like(z_init)
+        else:
+            # Compute input embeddings
+            with torch.set_grad_enabled(self.training and self.structure_prediction_training):
+                s_inputs = self.input_embedder(feats)
 
-            # Compute pairwise mask
-            mask = feats["token_pad_mask"].float()
-            pair_mask = mask[:, :, None] * mask[:, None, :]
+                # Initialize the sequence and pairwise embeddings
+                s_init = self.s_init(s_inputs)
+                z_init = self.z_init_1(s_inputs)[:, :, None] + self.z_init_2(s_inputs)[:, None, :]
+                relative_position_encoding = self.rel_pos(feats)
+                z_init = z_init + relative_position_encoding
+                z_init = z_init + self.token_bonds(feats["token_bonds"].float())
 
-            for i in range(recycling_steps + 1):
-                with torch.set_grad_enabled(self.training and (i == recycling_steps)):
-                    # Fixes an issue with unused parameters in autocast
-                    if self.training and (i == recycling_steps) and torch.is_autocast_enabled():
-                        torch.clear_autocast_cache()
+                # Perform rounds of the pairwise stack
+                s = torch.zeros_like(s_init)
+                z = torch.zeros_like(z_init)
 
-                    # Apply recycling
-                    s = s_init + self.s_recycle(self.s_norm(s))
-                    z = z_init + self.z_recycle(self.z_norm(z))
+                # Compute pairwise mask
+                mask = feats["token_pad_mask"].float()
+                pair_mask = mask[:, :, None] * mask[:, None, :]
 
-                    # Compute pairwise stack
-                    if not self.no_msa:
-                        z = z + self.msa_module(z, s_inputs, feats)
+                for i in range(recycling_steps + 1):
+                    with torch.set_grad_enabled(self.training and (i == recycling_steps)):
+                        # Fixes an issue with unused parameters in autocast
+                        if self.training and (i == recycling_steps) and torch.is_autocast_enabled():
+                            torch.clear_autocast_cache()
 
-                    # Revert to uncompiled version for validation
-                    if self.is_pairformer_compiled and not self.training:
-                        pairformer_module = self.pairformer_module._orig_mod  # noqa: SLF001
-                    else:
-                        pairformer_module = self.pairformer_module
+                        # Apply recycling
+                        s = s_init + self.s_recycle(self.s_norm(s))
+                        z = z_init + self.z_recycle(self.z_norm(z))
 
-                    s, z = pairformer_module(s, z, mask=mask, pair_mask=pair_mask)
+                        # Compute pairwise stack
+                        if not self.no_msa:
+                            z = z + self.msa_module(z, s_inputs, feats)
 
-            pdistogram = self.distogram_module(z)
-            dict_out = {"pdistogram": pdistogram}
+                        # Revert to uncompiled version for validation
+                        if self.is_pairformer_compiled and not self.training:
+                            pairformer_module = self.pairformer_module._orig_mod  # noqa: SLF001
+                        else:
+                            pairformer_module = self.pairformer_module
+
+                        s, z = pairformer_module(s, z, mask=mask, pair_mask=pair_mask)
+
+                pdistogram = self.distogram_module(z)
+                dict_out = {"pdistogram": pdistogram}
+
+        # Optionally save latents for output (used in predict_step)
+        if save_latents_for_output:
+            dict_out["s_trunk_to_save"] = s.detach().clone()
+            dict_out["z_trunk_to_save"] = z.detach().clone()
+            dict_out["s_inputs_to_save"] = s_inputs.detach().clone()
+            dict_out["rel_pos_encoding_to_save"] = relative_position_encoding.detach().clone()
 
         # Compute structure module
         if self.training and self.structure_prediction_training:
@@ -1082,6 +1105,7 @@ class Boltz1(LightningModule):
                 ablation_Z=self.predict_args.get("ablation_Z", False),
                 ablation_S=self.predict_args.get("ablation_S", False),
                 ablation_X=self.predict_args.get("ablation_X", False),
+                save_latents_for_output=self.predict_args.get("save_latents", False),
             )
             pred_dict = {"exception": False}
             pred_dict["masks"] = batch["atom_pad_mask"]
@@ -1112,6 +1136,19 @@ class Boltz1(LightningModule):
                 pred_dict["pae"] = out["pae"]
             if self.predict_args.get("write_full_pde", False):
                 pred_dict["pde"] = out["pde"]
+
+            if self.predict_args.get("save_latents", False):
+                pred_dict["s_trunk_latent"] = out.pop("s_trunk_to_save", None)
+                pred_dict["z_trunk_latent"] = out.pop("z_trunk_to_save", None)
+                pred_dict["s_inputs_latent"] = out.pop("s_inputs_to_save", None)
+                pred_dict["rel_pos_encoding_latent"] = out.pop("rel_pos_encoding_to_save", None)
+                # The user/writer is responsible for saving the batch (feats) if needed.
+                # Cloning to avoid issues if batch is modified later by PL or other parts.
+                pred_dict["feats_batch"] = {
+                    k: v.clone().detach() if isinstance(v, torch.Tensor) else v
+                    for k, v in batch.items()
+                }
+
             return pred_dict
 
         except RuntimeError as e:  # catch out of memory exceptions

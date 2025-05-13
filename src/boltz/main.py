@@ -609,6 +609,12 @@ def cli() -> None:
     help="Whether to ablate the X module. Default is False.",
     default=False,
 )
+@click.option(
+    "--save_latents",
+    is_flag=True,
+    help="Save S and Z latents, S_inputs, and relative position encoding. Default is False.",
+    default=False,
+)
 def predict(
     data: str,
     out_dir: str,
@@ -639,6 +645,7 @@ def predict(
     ablation_z: bool = False,
     ablation_s: bool = False,
     ablation_x: bool = False,
+    save_latents: bool = False,
 ) -> None:
     """Run predictions with Boltz-1."""
     # If cpu, write a friendly warning
@@ -740,6 +747,7 @@ def predict(
         "ablation_Z": ablation_z,
         "ablation_S": ablation_s,
         "ablation_X": ablation_x,
+        "save_latents": save_latents,
     }
     diffusion_params = BoltzDiffusionParams()
     diffusion_params.step_scale = step_scale
