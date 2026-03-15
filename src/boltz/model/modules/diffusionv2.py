@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from math import sqrt
+from math import ceil, sqrt
 
 import numpy as np
 import torch
@@ -292,6 +292,43 @@ class AtomDiffusion(Module):
         sigmas = F.pad(sigmas, (0, 1), value=0.0)  # last step is sigma value of 0.
         return sigmas
 
+    @staticmethod
+    def _slice_conditioning_for_chunk(
+        network_condition_kwargs: dict, trunk_ids: torch.Tensor
+    ) -> dict:
+        """Slice network conditioning tensors to match a specific chunk of samples.
+
+        For each sample in the chunk, ``trunk_ids`` maps it to the corresponding
+        trunk latent index so that every sample gets its own trunk conditioning.
+
+        Parameters
+        ----------
+        network_condition_kwargs : dict
+            The full set of conditioning keyword arguments passed to ``sample()``.
+        trunk_ids : torch.Tensor
+            1-D integer tensor of length ``chunk_size`` where entry ``i`` gives
+            the trunk index for sample ``i`` in the current chunk.
+
+        Returns
+        -------
+        dict
+            A new dict with tensors indexed by ``trunk_ids`` and callables kept
+            as-is.  Nested dicts (``feats``, ``diffusion_conditioning``) are
+            handled element-by-element.
+        """
+        result = {}
+        for k, v in network_condition_kwargs.items():
+            if isinstance(v, torch.Tensor):
+                result[k] = v[trunk_ids]
+            elif isinstance(v, dict):
+                result[k] = {
+                    dk: dv[trunk_ids] if isinstance(dv, torch.Tensor) else dv
+                    for dk, dv in v.items()
+                }
+            else:
+                result[k] = v
+        return result
+
     def sample(
         self,
         atom_mask,
@@ -308,10 +345,18 @@ class AtomDiffusion(Module):
         ):
             potentials = get_potentials(steering_args, boltz2=True)
 
+        # Number of distinct trunk latents (batch dimension of the conditioning).
+        orig_batch_size = atom_mask.shape[0]
+
         if steering_args["fk_steering"]:
             multiplicity = multiplicity * steering_args["num_particles"]
-            energy_traj = torch.empty((multiplicity, 0), device=self.device)
-            resample_weights = torch.ones(multiplicity, device=self.device).reshape(
+
+        # Total samples across all trunks and all diffusion seeds.
+        total_samples = orig_batch_size * multiplicity
+
+        if steering_args["fk_steering"]:
+            energy_traj = torch.empty((total_samples, 0), device=self.device)
+            resample_weights = torch.ones(total_samples, device=self.device).reshape(
                 -1, steering_args["num_particles"]
             )
         if (
@@ -319,12 +364,12 @@ class AtomDiffusion(Module):
             or steering_args["contact_guidance_update"]
         ):
             scaled_guidance_update = torch.zeros(
-                (multiplicity, *atom_mask.shape[1:], 3),
+                (total_samples, *atom_mask.shape[1:], 3),
                 dtype=torch.float32,
                 device=self.device,
             )
         if max_parallel_samples is None:
-            max_parallel_samples = multiplicity
+            max_parallel_samples = total_samples
 
         num_sampling_steps = default(num_sampling_steps, self.num_sampling_steps)
         atom_mask = atom_mask.repeat_interleave(multiplicity, 0)
@@ -349,7 +394,7 @@ class AtomDiffusion(Module):
         # gradually denoise
         for step_idx, (sigma_tm, sigma_t, gamma) in enumerate(sigmas_and_gammas):
             random_R, random_tr = compute_random_augmentation(
-                multiplicity, device=atom_coords.device, dtype=atom_coords.dtype
+                total_samples, device=atom_coords.device, dtype=atom_coords.dtype
             )
             atom_coords = atom_coords - atom_coords.mean(dim=-2, keepdims=True)
             atom_coords = (
@@ -379,18 +424,24 @@ class AtomDiffusion(Module):
 
             with torch.no_grad():
                 atom_coords_denoised = torch.zeros_like(atom_coords_noisy)
-                sample_ids = torch.arange(multiplicity).to(atom_coords_noisy.device)
-                sample_ids_chunks = sample_ids.chunk(
-                    multiplicity % max_parallel_samples + 1
-                )
+                sample_ids = torch.arange(total_samples).to(atom_coords_noisy.device)
+                num_chunks = ceil(total_samples / max_parallel_samples)
+                sample_ids_chunks = sample_ids.chunk(num_chunks)
 
                 for sample_ids_chunk in sample_ids_chunks:
+                    # Map each sample in this chunk to its trunk latent index.
+                    # With multiplicity samples per trunk, sample i belongs to
+                    # trunk i // multiplicity.
+                    trunk_ids = sample_ids_chunk // multiplicity
+                    chunk_kwargs = self._slice_conditioning_for_chunk(
+                        network_condition_kwargs, trunk_ids
+                    )
                     atom_coords_denoised_chunk = self.preconditioned_network_forward(
                         atom_coords_noisy[sample_ids_chunk],
                         t_hat,
                         network_condition_kwargs=dict(
-                            multiplicity=sample_ids_chunk.numel(),
-                            **network_condition_kwargs,
+                            multiplicity=1,
+                            **chunk_kwargs,
                         ),
                     )
                     atom_coords_denoised[sample_ids_chunk] = atom_coords_denoised_chunk
@@ -403,7 +454,7 @@ class AtomDiffusion(Module):
                     or step_idx == num_sampling_steps - 1
                 ):
                     # Compute energy of x_0 prediction
-                    energy = torch.zeros(multiplicity, device=self.device)
+                    energy = torch.zeros(total_samples, device=self.device)
                     for potential in potentials:
                         parameters = potential.compute_parameters(steering_t)
                         if parameters["resampling_weight"] > 0:

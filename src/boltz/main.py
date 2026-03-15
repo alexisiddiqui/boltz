@@ -868,6 +868,18 @@ def cli() -> None:
     default=1,
 )
 @click.option(
+    "--num_trunk_samples",
+    type=int,
+    help=(
+        "The number of independent trunk (pairformer) forward passes to run. "
+        "Each pass produces a distinct set of latent representations; all "
+        "latents are then fed together into the diffusion module so that "
+        "diffusion_samples structures are generated per trunk run. "
+        "Default is 1."
+    ),
+    default=1,
+)
+@click.option(
     "--max_parallel_samples",
     type=int,
     help="The maximum number of samples to predict in parallel. Default is None.",
@@ -1050,6 +1062,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     recycling_steps: int = 3,
     sampling_steps: int = 200,
     diffusion_samples: int = 1,
+    num_trunk_samples: int = 1,
     sampling_steps_affinity: int = 200,
     diffusion_samples_affinity: int = 3,
     max_parallel_samples: Optional[int] = None,
@@ -1300,6 +1313,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
             "recycling_steps": recycling_steps,
             "sampling_steps": sampling_steps,
             "diffusion_samples": diffusion_samples,
+            "num_trunk_samples": num_trunk_samples,
             "max_parallel_samples": max_parallel_samples,
             "write_confidence_summary": True,
             "write_full_pae": write_full_pae,
