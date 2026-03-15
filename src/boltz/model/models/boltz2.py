@@ -852,6 +852,7 @@ class Boltz2(LightningModule):
         feats: dict[str, Tensor],
         num_sampling_steps: Optional[int] = None,
         diffusion_samples: int = 1,
+        max_parallel_samples: Optional[int] = None,
         recompute_conditioning: bool = False,
         diffusion_conditioning: Optional[dict[str, Tensor]] = None,
     ) -> dict[str, Tensor]:
@@ -865,7 +866,8 @@ class Boltz2(LightningModule):
         Parameters
         ----------
         s : Tensor
-            Single representation [batch, num_tokens, token_s]
+            Single representation [batch, num_tokens, token_s].  ``batch`` may
+            be greater than 1 when multiple trunk latents are provided.
         z : Tensor
             Pair representation [batch, num_tokens, num_tokens, token_z]
         s_inputs : Tensor
@@ -873,11 +875,14 @@ class Boltz2(LightningModule):
         relative_position_encoding : Tensor
             Relative position encoding for the input
         feats : dict[str, Tensor]
-            Input features dictionary
+            Input features dictionary (batch size 1)
         num_sampling_steps : Optional[int]
             Number of diffusion sampling steps
         diffusion_samples : int
-            Number of structure samples to generate
+            Number of structure samples to generate per trunk latent
+        max_parallel_samples : Optional[int]
+            Maximum number of samples to run in parallel through the score
+            network.  Defaults to the total number of samples.
         recompute_conditioning : bool
             If True, recompute diffusion conditioning from s and z.
             If False, use provided diffusion_conditioning.
@@ -892,6 +897,8 @@ class Boltz2(LightningModule):
             - "plddt", "pae", "iptm", etc.: Confidence scores
         """
         dict_out = {}
+
+        num_trunk_samples = s.shape[0]
 
         # Optionally recompute diffusion conditioning from modified latents
         if recompute_conditioning:
@@ -916,15 +923,33 @@ class Boltz2(LightningModule):
                 "diffusion_conditioning must be provided if recompute_conditioning=False"
             )
 
+        # When multiple trunk latents are batched together we need the feats
+        # keys used inside DiffusionModule to carry the trunk batch dimension
+        # so that per-chunk slicing by trunk index works correctly.
+        if num_trunk_samples > 1:
+            feats_for_sample = dict(feats)
+            for key in ("token_pad_mask", "atom_pad_mask", "atom_to_token", "ref_pos"):
+                if key in feats_for_sample:
+                    t = feats_for_sample[key]
+                    if isinstance(t, Tensor) and t.shape[0] == 1:
+                        feats_for_sample[key] = t.expand(
+                            num_trunk_samples, *t.shape[1:]
+                        )
+            atom_mask = feats_for_sample["atom_pad_mask"].float().expand(num_trunk_samples, -1)
+        else:
+            feats_for_sample = feats
+            atom_mask = feats["atom_pad_mask"].float()
+
         # Run diffusion sampling
         with torch.autocast("cuda", enabled=False):
             struct_out = self.structure_module.sample(
                 s_trunk=s.float(),
                 s_inputs=s_inputs.float(),
-                feats=feats,
+                feats=feats_for_sample,
                 num_sampling_steps=num_sampling_steps,
-                atom_mask=feats["atom_pad_mask"].float(),
+                atom_mask=atom_mask,
                 multiplicity=diffusion_samples,
+                max_parallel_samples=max_parallel_samples,
                 steering_args=self.steering_args,
                 diffusion_conditioning=diffusion_conditioning,
             )
@@ -932,19 +957,44 @@ class Boltz2(LightningModule):
 
         # Run confidence module
         if self.confidence_prediction:
-            dict_out.update(
-                self.confidence_module(
-                    s_inputs=s_inputs.detach(),
-                    s=s.detach(),
-                    z=z.detach(),
-                    x_pred=dict_out["sample_atom_coords"].detach(),
-                    feats=feats,
-                    pred_distogram_logits=None,  # Not needed for confidence
-                    multiplicity=diffusion_samples,
-                    run_sequentially=True,
-                    use_kernels=self.use_kernels,
+            if num_trunk_samples > 1:
+                # Run the confidence module independently for each trunk latent
+                # and concatenate the per-sample results.
+                conf_outs = []
+                for trunk_idx in range(num_trunk_samples):
+                    start = trunk_idx * diffusion_samples
+                    end = (trunk_idx + 1) * diffusion_samples
+                    trunk_conf = self.confidence_module(
+                        s_inputs=s_inputs[trunk_idx : trunk_idx + 1].detach(),
+                        s=s[trunk_idx : trunk_idx + 1].detach(),
+                        z=z[trunk_idx : trunk_idx + 1].detach(),
+                        x_pred=dict_out["sample_atom_coords"][start:end].detach(),
+                        feats=feats,
+                        pred_distogram_logits=None,
+                        multiplicity=diffusion_samples,
+                        run_sequentially=True,
+                        use_kernels=self.use_kernels,
+                    )
+                    conf_outs.append(trunk_conf)
+                combined_conf = {
+                    key: torch.cat([co[key] for co in conf_outs], dim=0)
+                    for key in conf_outs[0]
+                }
+                dict_out.update(combined_conf)
+            else:
+                dict_out.update(
+                    self.confidence_module(
+                        s_inputs=s_inputs.detach(),
+                        s=s.detach(),
+                        z=z.detach(),
+                        x_pred=dict_out["sample_atom_coords"].detach(),
+                        feats=feats,
+                        pred_distogram_logits=None,  # Not needed for confidence
+                        multiplicity=diffusion_samples,
+                        run_sequentially=True,
+                        use_kernels=self.use_kernels,
+                    )
                 )
-            )
 
         return dict_out
 
@@ -1283,14 +1333,65 @@ class Boltz2(LightningModule):
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0) -> dict:
         try:
-            out = self(
-                batch,
-                recycling_steps=self.predict_args["recycling_steps"],
-                num_sampling_steps=self.predict_args["sampling_steps"],
-                diffusion_samples=self.predict_args["diffusion_samples"],
-                max_parallel_samples=self.predict_args["max_parallel_samples"],
-                run_confidence_sequentially=True,
-            )
+            num_trunk_samples = self.predict_args.get("num_trunk_samples", 1)
+
+            if num_trunk_samples > 1:
+                # Run the trunk N times to obtain N distinct latents (each run
+                # may differ due to stochastic MSA sub-sampling, etc.).
+                trunk_latents = [
+                    self.get_trunk_latents(
+                        batch,
+                        recycling_steps=self.predict_args["recycling_steps"],
+                    )
+                    for _ in range(num_trunk_samples)
+                ]
+
+                # Stack single/pair representations across trunk runs.
+                s = torch.cat([t["s"] for t in trunk_latents], dim=0)
+                z = torch.cat([t["z"] for t in trunk_latents], dim=0)
+                # s_inputs and relative_position_encoding are deterministic
+                # (depend only on the input features, not on random MSA draws).
+                s_inputs = trunk_latents[0]["s_inputs"]
+                relative_position_encoding = trunk_latents[0]["relative_position_encoding"]
+
+                # Stack diffusion conditioning: tensor values come from each
+                # trunk run; callables (like to_keys) are shared and identical.
+                ref_cond = trunk_latents[0]["diffusion_conditioning"]
+                diffusion_conditioning = {
+                    key: (
+                        torch.cat(
+                            [t["diffusion_conditioning"][key] for t in trunk_latents],
+                            dim=0,
+                        )
+                        if isinstance(ref_cond[key], Tensor)
+                        else ref_cond[key]
+                    )
+                    for key in ref_cond
+                }
+
+                out = self.run_from_latents(
+                    s=s,
+                    z=z,
+                    s_inputs=s_inputs,
+                    relative_position_encoding=relative_position_encoding,
+                    feats=batch,
+                    num_sampling_steps=self.predict_args["sampling_steps"],
+                    diffusion_samples=self.predict_args["diffusion_samples"],
+                    max_parallel_samples=self.predict_args["max_parallel_samples"],
+                    diffusion_conditioning=diffusion_conditioning,
+                )
+                # Expose the first trunk's embeddings for downstream writers.
+                out["s"] = trunk_latents[0]["s"]
+                out["z"] = trunk_latents[0]["z"]
+            else:
+                out = self(
+                    batch,
+                    recycling_steps=self.predict_args["recycling_steps"],
+                    num_sampling_steps=self.predict_args["sampling_steps"],
+                    diffusion_samples=self.predict_args["diffusion_samples"],
+                    max_parallel_samples=self.predict_args["max_parallel_samples"],
+                    run_confidence_sequentially=True,
+                )
             pred_dict = {"exception": False}
             if "keys_dict_batch" in self.predict_args:
                 for key in self.predict_args["keys_dict_batch"]:
