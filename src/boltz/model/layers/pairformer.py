@@ -160,6 +160,7 @@ class PairformerModule(nn.Module):
         mask: Tensor,
         pair_mask: Tensor,
         use_kernels: bool = False,
+        checkpoint: bool = False,
     ) -> tuple[Tensor, Tensor]:
         """Perform the forward pass.
 
@@ -175,6 +176,9 @@ class PairformerModule(nn.Module):
             The pairwise mask.
         use_kernels : bool
             Whether to use kernels.
+        checkpoint : bool
+            Whether to use activation checkpointing outside of training,
+            e.g. to backpropagate at inference time.
 
         """
         if not self.training:
@@ -195,6 +199,17 @@ class PairformerModule(nn.Module):
                     pair_mask,
                     chunk_size_tri_attn,
                     use_kernels,
+                )
+            elif checkpoint and torch.is_grad_enabled():
+                s, z = torch.utils.checkpoint.checkpoint(
+                    layer,
+                    s,
+                    z,
+                    mask,
+                    pair_mask,
+                    chunk_size_tri_attn,
+                    use_kernels,
+                    use_reentrant=False,
                 )
             else:
                 s, z = layer(s, z, mask, pair_mask, chunk_size_tri_attn, use_kernels)

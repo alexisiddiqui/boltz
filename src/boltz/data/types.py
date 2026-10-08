@@ -527,6 +527,7 @@ class InferenceOptions:
     contact_constraints: Optional[
         list[tuple[tuple[int, int], tuple[int, int], float, bool]]
     ] = None
+    steering: Optional[dict] = None
 
 
 @dataclass(frozen=True)

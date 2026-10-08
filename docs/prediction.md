@@ -60,6 +60,11 @@ templates:
 properties:
     - affinity:
         binder: CHAIN_ID
+steering:
+    num_particles: 3
+    confidence:
+        resampling: true
+        guidance: false
 
 ```
 
@@ -103,6 +108,35 @@ For any template you provide, you can also specify a `force` flag which will use
 ### Properties (affinity)
 `properties` is an optional field that allows you to specify whether you want to compute the affinity. If enabled, you must also provide the chain_id corresponding to the small molecule against which the affinity will be computed. Only one single small molecule can be specified for affinity computation. It must be a ligand chain (not a protein, DNA or RNA) and has to be at most 128 atoms counting heavy atoms and hydrogens kept by `RDKit RemoveHs`, however, we do not recommend running the affinity module with ligands significantly larger than 56 atoms (counted as above, limit set during training). At this point, Boltz only supports the computation of affinity of small molecules to protein targets, if ran with an RNA/DNA/co-factor target, the code will not crash but the output will be unreliable.
 
+### Steering
+`steering` is optional and enables inference-time steering for this input only (Boltz-2 only). Any key set here overrides the corresponding command line option for this input, and unset keys fall back to the command line values.
+
+```yaml
+steering:
+    num_particles: 3              # --num_particles, particles per diffusion sample
+    potentials: false             # --use_potentials, FK steering + guidance with physical potentials
+    fk_lambda: 4.0                # --fk_lambda
+    fk_resampling_interval: 3     # --fk_resampling_interval
+    confidence:
+        resampling: true          # --use_confidence_steering, FK resampling on the confidence score
+        guidance: false           # --confidence_guidance, (experimental) gradient ascent on the confidence score
+        metric: auto              # --confidence_metric: auto | ptm | iptm | protein_iptm | ligand_iptm
+        lambda: 20.0              # --confidence_lambda
+        resampling_interval: 5    # --confidence_resampling_interval
+        resampling_start: 0.4     # --confidence_resampling_start, fraction of the trajectory
+        gd_steps: 1               # --confidence_gd_steps
+        guidance_strength: 10.0   # --confidence_guidance_strength
+        guidance_max_step: 1.0    # --confidence_guidance_max_step, per-atom clip in Angstrom
+        guidance_interval: 5      # --confidence_guidance_interval
+        guidance_start: 0.25      # --confidence_guidance_start, fraction of the trajectory
+        guidance_end: 0.75        # --confidence_guidance_end, fraction of the trajectory
+```
+
+Confidence steering scores the denoised structure of each particle with the confidence module during sampling. With `metric: auto`, it uses ipTM for complexes and pTM for monomers. With `resampling`, particles are resampled with Feynman-Kac weights based on the improvement in the score, starting from `resampling_start` (the confidence of very noisy structures is uninformative), and the highest scoring particle of each group is kept at the end. With `guidance` (experimental), the denoised structure is pushed up the gradient of the score, in a window of the trajectory. This is made differentiable with a straight-through soft distance binning, so the scores themselves are unchanged. In our tests guidance had little effect on the final structures, so we recommend starting with `resampling` only.
+
+Note that steering optimises the model's own confidence, so it can raise ipTM without improving the structure: when the confidence head is miscalibrated (e.g. single sequence mode without templates), particles with confidently wrong interfaces can be selected. Steering is most useful when the confidence head discriminates well between poses, and the reported ipTM of steered predictions should not be compared directly with that of unsteered ones. In our tests, confidence resampling performed similarly to drawing the same total number of unsteered samples and keeping the highest ipTM ones, which is a useful baseline to compare against. Confidence steering can be combined with the physical potentials (`potentials` / `--use_potentials`). Guidance is the expensive part: each guidance step runs a forward and backward pass of the confidence module for every particle. See `examples/confidence_steering.yaml`.
+
+Note that inputs are only processed once per output directory, so changes to the `steering` block of an already processed input need `--override` together with a fresh output directory, or removal of the `processed` folder.
 
 ### Example
 
@@ -136,6 +170,8 @@ Examples of common options include:
 
 * Adding the `--use_potentials` flag, Boltz uses an inference time potential that significantly improve the physical quality of the poses. 
 
+* Adding the `--use_confidence_steering` flag (and optionally `--confidence_guidance`), Boltz steers sampling towards structures with a higher predicted ipTM (pTM for monomers), see [Steering](#steering).
+
 * To predict a structure using 10 recycling steps and 25 samples (the default parameters for AlphaFold3) use (note however that the prediction will take significantly longer): `--recycling_steps 10 --diffusion_samples 25`
 
 
@@ -168,6 +204,21 @@ Examples of common options include:
 | `--msa_server_url`       | str             | `https://api.colabfold.com` | MSA server url. Used only if --use_msa_server is set.                                                                                                                               |
 | `--msa_pairing_strategy` | str             | `greedy`                    | Pairing strategy to use. Used only if --use_msa_server is set. Options are 'greedy' and 'complete'                                                                                  |
 | `--use_potentials`        | `FLAG`          | `False`                     | Whether to run the original Boltz-2 model using inference time potentials.                                                                                                        |
+| `--num_particles`        | `INTEGER`       | `3`                         | Number of particles per diffusion sample for FK / confidence steering.                                                                                                            |
+| `--fk_lambda`            | `FLOAT`         | `4.0`                       | FK steering lambda for the potential energies.                                                                                                                                    |
+| `--fk_resampling_interval` | `INTEGER`     | `3`                         | FK resampling interval for the potentials.                                                                                                                                        |
+| `--use_confidence_steering` | `FLAG`       | `False`                     | FK resampling on the confidence score (Boltz-2 only).                                                                                                                             |
+| `--confidence_guidance`  | `FLAG`          | `False`                     | (Experimental) Gradient guidance on the confidence score (Boltz-2 only).                                                                                                          |
+| `--confidence_metric`    | `[auto,ptm,iptm,protein_iptm,ligand_iptm]` | `auto`   | Confidence score used for steering, `auto` uses ipTM for complexes and pTM for monomers.                                                                                          |
+| `--confidence_lambda`    | `FLOAT`         | `20.0`                      | FK steering lambda for the confidence score.                                                                                                                                      |
+| `--confidence_resampling_interval` | `INTEGER` | `5`                     | Resampling interval for confidence steering.                                                                                                                                      |
+| `--confidence_resampling_start` | `FLOAT`  | `0.4`                       | Fraction of the diffusion trajectory at which confidence resampling starts.                                                                                                      |
+| `--confidence_gd_steps`  | `INTEGER`       | `1`                         | Number of gradient steps per confidence guidance update.                                                                                                                          |
+| `--confidence_guidance_strength` | `FLOAT` | `10.0`                      | Step size of the confidence gradient guidance.                                                                                                                                    |
+| `--confidence_guidance_max_step` | `FLOAT` | `1.0`                       | Maximum per-atom displacement (in Angstrom) of each confidence guidance step.                                                                                                     |
+| `--confidence_guidance_interval` | `INTEGER` | `5`                       | Apply confidence guidance every N diffusion steps.                                                                                                                                |
+| `--confidence_guidance_start` | `FLOAT`    | `0.25`                      | Fraction of the diffusion trajectory at which confidence guidance starts.                                                                                                         |
+| `--confidence_guidance_end` | `FLOAT`      | `0.75`                      | Fraction of the diffusion trajectory at which confidence guidance ends.                                                                                                           |
 | `--write_full_pae`       | `FLAG`          | `False`                     | Whether to save the full PAE matrix as a file.                                                                                                                                      |
 | `--write_full_pde`       | `FLAG`          | `False`                     | Whether to save the full PDE matrix as a file.                                                                                                                                      |
 

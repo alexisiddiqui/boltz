@@ -399,6 +399,114 @@ class Boltz2(LightningModule):
                 x["label"] for x in self.val_group_mapper.values()
             }, msg
 
+    def get_steering_args(self, feats: dict[str, Tensor]) -> Optional[dict]:
+        """Merge the per-target steering overrides from the input file.
+
+        Parameters
+        ----------
+        feats : dict[str, Tensor]
+            The input features, with the records at inference time.
+
+        Returns
+        -------
+        Optional[dict]
+            The steering arguments for this batch.
+
+        """
+        steering_args = self.steering_args
+        records = feats.get("record")
+        if steering_args is None or not records or self.affinity_prediction:
+            return steering_args
+
+        options = records[0].inference_options
+        overrides = None if options is None else options.steering
+        if overrides:
+            steering_args = {**steering_args, **overrides}
+        return steering_args
+
+    def get_confidence_fn(
+        self,
+        steering_args: Optional[dict],
+        s_inputs: Tensor,
+        s: Tensor,
+        z: Tensor,
+        pdistogram: Tensor,
+        feats: dict[str, Tensor],
+    ):
+        """Build the confidence scoring function used for steering.
+
+        Parameters
+        ----------
+        steering_args : Optional[dict]
+            The steering arguments.
+        s_inputs : Tensor
+            The input single representation.
+        s : Tensor
+            The trunk single representation.
+        z : Tensor
+            The trunk pair representation.
+        pdistogram : Tensor
+            The predicted distogram logits.
+        feats : dict[str, Tensor]
+            The input features.
+
+        Returns
+        -------
+        Optional[Callable]
+            A function mapping denoised coordinates to a confidence score
+            per sample, or None if confidence steering is disabled.
+
+        """
+        if (
+            steering_args is None
+            or not self.confidence_prediction
+            or not (
+                steering_args.get("confidence_steering")
+                or steering_args.get("confidence_guidance")
+            )
+        ):
+            return None
+
+        metric = steering_args.get("confidence_metric", "auto")
+        if metric == "auto":
+            asym_id = feats["asym_id"][feats["token_pad_mask"].bool()]
+            metric = "iptm" if asym_id.unique().numel() > 1 else "ptm"
+
+        # Match the autocast settings of the regular confidence prediction
+        device_type = autocast_device_type(s.device.type)
+        try:
+            autocast_enabled = torch.is_autocast_enabled(device_type)
+            autocast_dtype = torch.get_autocast_dtype(device_type)
+        except TypeError:
+            autocast_enabled = torch.is_autocast_enabled()
+            autocast_dtype = torch.get_autocast_gpu_dtype()
+
+        s_inputs, s, z = s_inputs.detach(), s.detach(), z.detach()
+        pred_distogram_logits = pdistogram[:, :, :, 0].detach()
+
+        def confidence_fn(
+            atom_coords: Tensor, multiplicity: int, differentiable: bool = False
+        ) -> Tensor:
+            with torch.autocast(
+                device_type, dtype=autocast_dtype, enabled=autocast_enabled
+            ):
+                out = self.confidence_module(
+                    s_inputs=s_inputs,
+                    s=s,
+                    z=z,
+                    x_pred=atom_coords,
+                    feats=feats,
+                    pred_distogram_logits=pred_distogram_logits,
+                    multiplicity=multiplicity,
+                    run_sequentially=True,
+                    use_kernels=self.use_kernels,
+                    differentiable=differentiable,
+                )
+            return out[metric].float()
+
+        confidence_fn.metric = metric
+        return confidence_fn
+
     def forward(
         self,
         feats: dict[str, Tensor],
@@ -530,6 +638,10 @@ class Boltz2(LightningModule):
                     "token_trans_bias": token_trans_bias,
                 }
 
+                steering_args = self.get_steering_args(feats)
+                confidence_fn = self.get_confidence_fn(
+                    steering_args, s_inputs, s, z, pdistogram, feats
+                )
                 with torch.autocast(autocast_device_type(s.device.type), enabled=False):
                     struct_out = self.structure_module.sample(
                         s_trunk=s.float(),
@@ -539,8 +651,9 @@ class Boltz2(LightningModule):
                         atom_mask=feats["atom_pad_mask"].float(),
                         multiplicity=diffusion_samples,
                         max_parallel_samples=max_parallel_samples,
-                        steering_args=self.steering_args,
+                        steering_args=steering_args,
                         diffusion_conditioning=diffusion_conditioning,
+                        confidence_fn=confidence_fn,
                     )
                     dict_out.update(struct_out)
 

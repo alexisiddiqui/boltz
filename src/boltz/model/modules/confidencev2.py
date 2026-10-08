@@ -106,6 +106,31 @@ class ConfidenceModule(nn.Module):
             **confidence_args,
         )
 
+    def soft_distogram_embed(self, d, distogram):
+        """Embed the distogram with a straight-through soft binning.
+
+        The forward value matches the hard binning exactly, while the
+        backward pass uses a softmax over the distance to the bin centers,
+        so that confidence scores are differentiable w.r.t. coordinates.
+        """
+        width = self.boundaries[1] - self.boundaries[0]
+        centers = torch.cat(
+            [
+                self.boundaries[:1] - width / 2,
+                (self.boundaries[1:] + self.boundaries[:-1]) / 2,
+                self.boundaries[-1:] + width / 2,
+            ]
+        )
+        weight = self.dist_bin_pairwise_embed.weight
+        with torch.autocast(d.device.type, enabled=False):
+            d = d.float()
+            hard = nn.functional.one_hot(distogram, num_classes=weight.shape[0])
+            soft = torch.softmax(
+                -((d.unsqueeze(-1) - centers) ** 2) / width**2, dim=-1
+            )
+            one_hot = hard.float() + (soft - soft.detach())
+            return one_hot @ weight.float()
+
     def forward(
         self,
         s_inputs,  # Float['b n ts']
@@ -117,6 +142,7 @@ class ConfidenceModule(nn.Module):
         multiplicity=1,
         run_sequentially=False,
         use_kernels: bool = False,
+        differentiable: bool = False,
     ):
         if run_sequentially and multiplicity > 1:
             assert z.shape[0] == 1, "Not supported with batch size > 1"
@@ -133,6 +159,7 @@ class ConfidenceModule(nn.Module):
                         multiplicity=1,
                         run_sequentially=False,
                         use_kernels=use_kernels,
+                        differentiable=differentiable,
                     )
                 )
 
@@ -196,14 +223,22 @@ class ConfidenceModule(nn.Module):
         x_pred_repr = torch.bmm(token_to_rep_atom.float(), x_pred)
         d = torch.cdist(x_pred_repr, x_pred_repr)
         distogram = (d.unsqueeze(-1) > self.boundaries).sum(dim=-1).long()
-        distogram = self.dist_bin_pairwise_embed(distogram)
+        if differentiable:
+            distogram = self.soft_distogram_embed(d, distogram)
+        else:
+            distogram = self.dist_bin_pairwise_embed(distogram)
         z = z + distogram
 
         mask = feats["token_pad_mask"].repeat_interleave(multiplicity, 0)
         pair_mask = mask[:, :, None] * mask[:, None, :]
 
         s_t, z_t = self.pairformer_stack(
-            s, z, mask=mask, pair_mask=pair_mask, use_kernels=use_kernels
+            s,
+            z,
+            mask=mask,
+            pair_mask=pair_mask,
+            use_kernels=use_kernels,
+            checkpoint=differentiable,
         )
 
         # AF3 has residual connections, we remove them

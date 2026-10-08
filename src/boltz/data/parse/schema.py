@@ -938,6 +938,139 @@ def token_spec_to_ids(
         return chain_to_idx[chain_name], residue_index_or_atom_name - 1
 
 
+CONFIDENCE_STEERING_METRICS = (
+    "auto",
+    "ptm",
+    "iptm",
+    "protein_iptm",
+    "ligand_iptm",
+)
+
+
+def parse_steering_schema(steering: Optional[dict]) -> Optional[dict]:
+    """Parse the optional per-target steering block.
+
+    The block is flattened into the field names of BoltzSteeringParams,
+    which override the command line steering arguments for this target:
+
+    steering:
+        num_particles: 3
+        potentials: false
+        confidence:
+            resampling: true
+            guidance: true
+            metric: auto
+            lambda: 20.0
+            resampling_interval: 5
+            resampling_start: 0.4
+            gd_steps: 1
+            guidance_strength: 10.0
+            guidance_max_step: 1.0
+            guidance_interval: 5
+            guidance_start: 0.25
+            guidance_end: 0.75
+
+    Parameters
+    ----------
+    steering : Optional[dict]
+        The steering block from the input schema.
+
+    Returns
+    -------
+    Optional[dict]
+        The flattened steering overrides, or None if not provided.
+
+    """
+    if steering is None:
+        return None
+    if not isinstance(steering, dict):
+        msg = f"Invalid steering block {steering}, expected a dictionary."
+        raise ValueError(msg)  # noqa: TRY004
+
+    top_keys = {
+        "num_particles": ("num_particles", int),
+        "fk_lambda": ("fk_lambda", float),
+        "fk_resampling_interval": ("fk_resampling_interval", int),
+        "num_gd_steps": ("num_gd_steps", int),
+    }
+    confidence_keys = {
+        "resampling": ("confidence_steering", bool),
+        "guidance": ("confidence_guidance", bool),
+        "metric": ("confidence_metric", str),
+        "lambda": ("confidence_lambda", float),
+        "resampling_interval": ("confidence_resampling_interval", int),
+        "resampling_start": ("confidence_resampling_start", float),
+        "gd_steps": ("confidence_gd_steps", int),
+        "guidance_strength": ("confidence_guidance_strength", float),
+        "guidance_max_step": ("confidence_guidance_max_step", float),
+        "guidance_interval": ("confidence_guidance_interval", int),
+        "guidance_start": ("confidence_guidance_start", float),
+        "guidance_end": ("confidence_guidance_end", float),
+    }
+
+    def cast(key: str, value, typ: type):  # noqa: ANN001, ANN202
+        if typ is bool:
+            if not isinstance(value, bool):
+                msg = f"Invalid steering value for {key}: {value}, expected a boolean."
+                raise ValueError(msg)
+            return value
+        if typ is str:
+            return str(value)
+        try:
+            out = typ(value)
+        except (TypeError, ValueError) as e:
+            msg = f"Invalid steering value for {key}: {value}."
+            raise ValueError(msg) from e
+        if typ is float and key.endswith(
+            ("resampling_start", "guidance_start", "guidance_end")
+        ):
+            if not 0.0 <= out <= 1.0:
+                msg = f"Invalid steering value for {key}: {value}, must be in [0, 1]."
+                raise ValueError(msg)
+        if typ is int and out < 1:
+            msg = f"Invalid steering value for {key}: {value}, must be >= 1."
+            raise ValueError(msg)
+        return out
+
+    parsed = {}
+    for key, value in steering.items():
+        if key == "potentials":
+            value = cast(key, value, bool)  # noqa: PLW2901
+            parsed["fk_steering"] = value
+            parsed["physical_guidance_update"] = value
+        elif key == "confidence":
+            if not isinstance(value, dict):
+                msg = f"Invalid steering confidence block {value}, expected a dictionary."
+                raise ValueError(msg)
+            for conf_key, conf_value in value.items():
+                if conf_key not in confidence_keys:
+                    msg = (
+                        f"Unknown steering confidence key {conf_key}, "
+                        f"expected one of {list(confidence_keys)}."
+                    )
+                    raise ValueError(msg)
+                name, typ = confidence_keys[conf_key]
+                parsed[name] = cast(f"confidence.{conf_key}", conf_value, typ)
+        elif key in top_keys:
+            name, typ = top_keys[key]
+            parsed[name] = cast(key, value, typ)
+        else:
+            msg = (
+                f"Unknown steering key {key}, expected one of "
+                f"{['potentials', 'confidence', *top_keys]}."
+            )
+            raise ValueError(msg)
+
+    metric = parsed.get("confidence_metric")
+    if metric is not None and metric not in CONFIDENCE_STEERING_METRICS:
+        msg = (
+            f"Invalid confidence steering metric {metric}, "
+            f"expected one of {list(CONFIDENCE_STEERING_METRICS)}."
+        )
+        raise ValueError(msg)
+    return parsed
+
+
 def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     name: str,
     schema: dict,
@@ -979,6 +1112,10 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
             max_distance: 6
     templates:
         - cif: path/to/template.cif
+    steering:
+        confidence:
+            resampling: true
+            guidance: true
     properties:
         - affinity:
             binder: E
@@ -1006,6 +1143,12 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
     version = schema.get("version", 1)
     if version != 1:
         msg = f"Invalid version {version} in input!"
+        raise ValueError(msg)
+
+    # Parse the per-target steering overrides
+    steering = parse_steering_schema(schema.get("steering"))
+    if steering is not None and not boltz_2:
+        msg = "The steering block is only supported for Boltz-2."
         raise ValueError(msg)
 
     # Disable rdkit warnings
@@ -1804,7 +1947,9 @@ def parse_boltz_schema(  # noqa: C901, PLR0915, PLR0912
         chain_infos.append(chain_info)
 
     options = InferenceOptions(
-        pocket_constraints=pocket_constraints, contact_constraints=contact_constraints
+        pocket_constraints=pocket_constraints,
+        contact_constraints=contact_constraints,
+        steering=steering,
     )
     record = Record(
         id=name,

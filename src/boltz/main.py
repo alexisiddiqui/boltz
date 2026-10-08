@@ -155,6 +155,18 @@ class BoltzSteeringParams:
     physical_guidance_update: bool = False
     contact_guidance_update: bool = True
     num_gd_steps: int = 20
+    confidence_steering: bool = False
+    confidence_guidance: bool = False
+    confidence_metric: str = "auto"
+    confidence_lambda: float = 20.0
+    confidence_resampling_interval: int = 5
+    confidence_resampling_start: float = 0.4
+    confidence_gd_steps: int = 1
+    confidence_guidance_strength: float = 10.0
+    confidence_guidance_max_step: float = 1.0
+    confidence_guidance_interval: int = 5
+    confidence_guidance_start: float = 0.25
+    confidence_guidance_end: float = 0.75
 
 
 @rank_zero_only
@@ -971,6 +983,115 @@ def cli() -> None:
     help="Whether to use potentials for steering. Default is False.",
 )
 @click.option(
+    "--num_particles",
+    type=int,
+    help="Number of particles per sample for FK / confidence steering. Default is 3.",
+    default=3,
+)
+@click.option(
+    "--fk_lambda",
+    type=float,
+    help="FK steering lambda for the potential energies. Default is 4.0.",
+    default=4.0,
+)
+@click.option(
+    "--fk_resampling_interval",
+    type=int,
+    help="FK steering resampling interval for the potentials. Default is 3.",
+    default=3,
+)
+@click.option(
+    "--use_confidence_steering",
+    is_flag=True,
+    help=(
+        "Whether to use FK resampling on the confidence score (iPTM for "
+        "complexes, pTM for monomers by default). Boltz-2 only. Default is False."
+    ),
+)
+@click.option(
+    "--confidence_guidance",
+    is_flag=True,
+    help=(
+        "(EXPERIMENTAL) Whether to use gradient guidance on the confidence "
+        "score. Boltz-2 only. Default is False."
+    ),
+)
+@click.option(
+    "--confidence_metric",
+    type=click.Choice(["auto", "ptm", "iptm", "protein_iptm", "ligand_iptm"]),
+    help=(
+        "Confidence score used for steering. auto uses iptm for complexes "
+        "and ptm for monomers. Default is auto."
+    ),
+    default="auto",
+)
+@click.option(
+    "--confidence_lambda",
+    type=float,
+    help="FK steering lambda for the confidence score. Default is 20.0.",
+    default=20.0,
+)
+@click.option(
+    "--confidence_resampling_interval",
+    type=int,
+    help="Resampling interval for confidence steering. Default is 5.",
+    default=5,
+)
+@click.option(
+    "--confidence_resampling_start",
+    type=float,
+    help=(
+        "Fraction of the diffusion trajectory at which confidence resampling "
+        "starts. Default is 0.4."
+    ),
+    default=0.4,
+)
+@click.option(
+    "--confidence_gd_steps",
+    type=int,
+    help="Number of gradient steps per confidence guidance update. Default is 1.",
+    default=1,
+)
+@click.option(
+    "--confidence_guidance_strength",
+    type=float,
+    help="Step size of the confidence gradient guidance. Default is 10.0.",
+    default=10.0,
+)
+@click.option(
+    "--confidence_guidance_max_step",
+    type=float,
+    help=(
+        "Maximum per-atom displacement (in Angstrom) of each confidence "
+        "guidance step. Default is 1.0."
+    ),
+    default=1.0,
+)
+@click.option(
+    "--confidence_guidance_interval",
+    type=int,
+    help="Apply confidence guidance every N diffusion steps. Default is 5.",
+    default=5,
+)
+@click.option(
+    "--confidence_guidance_start",
+    type=float,
+    help=(
+        "Fraction of the diffusion trajectory at which confidence guidance "
+        "starts. Default is 0.25."
+    ),
+    default=0.25,
+)
+@click.option(
+    "--confidence_guidance_end",
+    type=float,
+    help=(
+        "Fraction of the diffusion trajectory at which confidence guidance "
+        "ends. Default is 0.75."
+    ),
+    default=0.75,
+)
+@click.option(
     "--model",
     default="boltz2",
     type=click.Choice(["boltz1", "boltz2"]),
@@ -1068,6 +1189,21 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     api_key_header: Optional[str] = None,
     api_key_value: Optional[str] = None,
     use_potentials: bool = False,
+    num_particles: int = 3,
+    fk_lambda: float = 4.0,
+    fk_resampling_interval: int = 3,
+    use_confidence_steering: bool = False,
+    confidence_guidance: bool = False,
+    confidence_metric: str = "auto",
+    confidence_lambda: float = 20.0,
+    confidence_resampling_interval: int = 5,
+    confidence_resampling_start: float = 0.4,
+    confidence_gd_steps: int = 1,
+    confidence_guidance_strength: float = 10.0,
+    confidence_guidance_max_step: float = 1.0,
+    confidence_guidance_interval: int = 5,
+    confidence_guidance_start: float = 0.25,
+    confidence_guidance_end: float = 0.75,
     model: Literal["boltz1", "boltz2"] = "boltz2",
     method: Optional[str] = None,
     affinity_mw_correction: Optional[bool] = False,
@@ -1133,6 +1269,10 @@ def predict(  # noqa: C901, PLR0915, PLR0912
     out_dir = Path(out_dir).expanduser()
     out_dir = out_dir / f"boltz_results_{data.stem}"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if model == "boltz1" and (use_confidence_steering or confidence_guidance):
+        msg = "Confidence steering is only supported for Boltz-2."
+        raise ValueError(msg)
 
     # Download necessary data and model
     if model == "boltz1":
@@ -1252,6 +1392,13 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         write_embeddings=write_embeddings,
     )
 
+    # Confidence guidance needs autograd, which inference mode disables
+    needs_grad = confidence_guidance or any(
+        (record.inference_options is not None)
+        and (record.inference_options.steering or {}).get("confidence_guidance")
+        for record in filtered_manifest.records
+    )
+
     # Set up trainer
     trainer = Trainer(
         default_root_dir=out_dir,
@@ -1260,6 +1407,7 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         accelerator=accelerator,
         devices=devices,
         precision=32 if model == "boltz1" else "bf16-mixed",
+        inference_mode=not needs_grad,
     )
 
     if filtered_manifest.records:
@@ -1309,6 +1457,21 @@ def predict(  # noqa: C901, PLR0915, PLR0912
         steering_args = BoltzSteeringParams()
         steering_args.fk_steering = use_potentials
         steering_args.physical_guidance_update = use_potentials
+        steering_args.num_particles = num_particles
+        steering_args.fk_lambda = fk_lambda
+        steering_args.fk_resampling_interval = fk_resampling_interval
+        steering_args.confidence_steering = use_confidence_steering
+        steering_args.confidence_guidance = confidence_guidance
+        steering_args.confidence_metric = confidence_metric
+        steering_args.confidence_lambda = confidence_lambda
+        steering_args.confidence_resampling_interval = confidence_resampling_interval
+        steering_args.confidence_resampling_start = confidence_resampling_start
+        steering_args.confidence_gd_steps = confidence_gd_steps
+        steering_args.confidence_guidance_strength = confidence_guidance_strength
+        steering_args.confidence_guidance_max_step = confidence_guidance_max_step
+        steering_args.confidence_guidance_interval = confidence_guidance_interval
+        steering_args.confidence_guidance_start = confidence_guidance_start
+        steering_args.confidence_guidance_end = confidence_guidance_end
 
         model_cls = Boltz2 if model == "boltz2" else Boltz1
         model_module = model_cls.load_from_checkpoint(
